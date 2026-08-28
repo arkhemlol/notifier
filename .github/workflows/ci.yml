@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tidy:
+    name: Module files are tidy
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Tidy module files
+        run: go mod tidy
+      - name: Verify tidy diff
+        run: |
+          git diff --exit-code -- go.mod go.sum
+          test -z "$(git status --porcelain --untracked-files=all -- go.mod go.sum)"
+
+  lint:
+    name: Lint
+    needs: tidy
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install lint tools
+        run: |
+          go install mvdan.cc/gofumpt@v0.11.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run make lint
+        run: make lint
+      - name: Verify lint left no uncommitted changes
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+  test:
+    name: Race and coverage
+    needs: tidy
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run make test
+        run: make test
+      - name: Generate cumulative coverage profile
+        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=cover.out ./...
+      - name: Coverage badge
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          profile: cover.out
+          git-token: ${{ github.ref == 'refs/heads/main' && secrets.GITHUB_TOKEN || '' }}
+          ## Orphan branch where the badge SVG is stored.
+          ## Create it once:  git checkout --orphan badges && git rm -rf . && git commit --allow-empty -m init && git push origin badges
+          git-branch: badges
+
+  govulncheck:
+    name: Govulncheck (weekly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          repo-checkout: false
+          go-version-file: go.mod
+          check-latest: false
+          go-package: ./...

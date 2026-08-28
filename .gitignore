@@ -1,0 +1,27 @@
+# Go build and test artifacts
+*.exe
+*.test
+coverage.out
+*.prof
+*.pprof
+cpu.out
+mem.out
+
+# SQLite databases created by running the examples
+examples/**/*.db
+
+# Benchmarks and profiles
+.bench/
+
+# build-size scratch space, removed by the target itself
+.size/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.zed/
+CLAUDE.md
+.agents/
+.claude/
+/graphify-out
+.specify/
