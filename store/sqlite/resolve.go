@@ -31,7 +31,7 @@ func (b batchWrite) args() []any {
 	}
 }
 
-const updateBatchPrefix = `UPDATE work_batches SET
+const updateBatchPrefix = `UPDATE notifier_work_batches SET
 		state = ?,
 		attempt_count = COALESCE(?, attempt_count),
 		retry_at = ?,
@@ -44,7 +44,7 @@ const updateBatchPrefix = `UPDATE work_batches SET
 		outcome_at = ?
 	WHERE `
 
-const insertBatchQuery = `INSERT INTO work_batches(
+const insertBatchQuery = `INSERT INTO notifier_work_batches(
 		plan_destination_key,
 		work_id,
 		state,
@@ -93,9 +93,9 @@ const (
 	fenceCanceledBatches = updateBatchPrefix + fenceableBatch + `
 		AND EXISTS (
 			SELECT 1
-			FROM work_batch_items wbi
-			JOIN deliveries d ON d.delivery_key = wbi.delivery_key
-			WHERE wbi.batch_key = work_batches.batch_key
+			FROM notifier_work_batch_items wbi
+			JOIN notifier_deliveries d ON d.delivery_key = wbi.delivery_key
+			WHERE wbi.batch_key = notifier_work_batches.batch_key
 				AND d.state = ?
 		)`
 
@@ -103,24 +103,24 @@ const (
 		"plan_destination_key = ? AND " + fenceableBatch
 )
 
-const settleDeliveriesPrefix = `UPDATE deliveries SET
+const settleDeliveriesPrefix = `UPDATE notifier_deliveries SET
 		state = ?, failure = ?, outcome_at = ?
 	WHERE `
 
 const (
 	settleBatchDeliveries = settleDeliveriesPrefix + `state = ? AND delivery_key IN (
-			SELECT delivery_key FROM work_batch_items WHERE batch_key = ?
+			SELECT delivery_key FROM notifier_work_batch_items WHERE batch_key = ?
 		)`
 
 	settleSiblingDeliveries = settleDeliveriesPrefix + `state = ?
 		AND item_key IN (
 			SELECT d.item_key
-			FROM work_batch_items wbi
-			JOIN deliveries d ON d.delivery_key = wbi.delivery_key
+			FROM notifier_work_batch_items wbi
+			JOIN notifier_deliveries d ON d.delivery_key = wbi.delivery_key
 			WHERE wbi.batch_key = ?
 		)
 		AND delivery_key NOT IN (
-			SELECT delivery_key FROM work_batch_items WHERE batch_key = ?
+			SELECT delivery_key FROM notifier_work_batch_items WHERE batch_key = ?
 		)`
 
 	settleDestinationDeliveries = settleDeliveriesPrefix +
@@ -274,10 +274,10 @@ func loadBatchResolution(
 		wb.resolution_scope,
 		wb.resolution_retry_after_ns,
 		wb.last_failure
-	FROM work_batches wb
-	JOIN plan_destinations pd
+	FROM notifier_work_batches wb
+	JOIN notifier_plan_destinations pd
 		ON pd.plan_destination_key = wb.plan_destination_key
-	JOIN plans p ON p.plan_key = pd.plan_key
+	JOIN notifier_plans p ON p.plan_key = pd.plan_key
 	WHERE wb.work_id = ?`, string(workID)).Scan(
 		&batch.key, &batch.destination, &policy, &batch.state, &batch.leaseToken,
 		&outcome, &scope, &batch.retryAfterNS, &batch.failure,
@@ -307,8 +307,8 @@ func batchDeliveries(
 		ctx, `SELECT
 		COUNT(*),
 		COALESCE(SUM(CASE WHEN d.state = ? THEN 1 ELSE 0 END), 0)
-	FROM work_batch_items wbi
-	JOIN deliveries d ON d.delivery_key = wbi.delivery_key
+	FROM notifier_work_batch_items wbi
+	JOIN notifier_deliveries d ON d.delivery_key = wbi.delivery_key
 	WHERE wbi.batch_key = ?`,
 		deliveryStatePending, batchKey,
 	).Scan(&members, &pending); err != nil {
@@ -366,7 +366,7 @@ func quarantineDestination(
 	preserveBatchKey int64,
 ) error {
 	if _, err := conn.exec(
-		ctx, `UPDATE destination_status SET
+		ctx, `UPDATE notifier_destination_status SET
 		state = ?, failure = ?
 	WHERE plan_destination_key = ?`,
 		destinationStateQuarantined, failure, destinationKey,
@@ -421,7 +421,7 @@ func (s *Store[T]) ActivateDestination(
 	return s.withDestination(ctx, "activate destination", plan, destination,
 		func(conn *txConn, destinationKey int64) error {
 			if _, err := conn.exec(
-				ctx, `UPDATE destination_status SET
+				ctx, `UPDATE notifier_destination_status SET
 				state = ?, failure = ?
 			WHERE plan_destination_key = ?`,
 				destinationStateActive, "", destinationKey,
@@ -441,9 +441,9 @@ func (s *Store[T]) PendingPlans(ctx context.Context) ([]core.PlanID, error) {
 		var err error
 
 		pending, err = queryAll(ctx, conn, "pending plans", `SELECT DISTINCT p.plan_id
-		FROM plans p
-		JOIN plan_destinations pd ON pd.plan_key = p.plan_key
-		JOIN deliveries d ON d.plan_destination_key = pd.plan_destination_key
+		FROM notifier_plans p
+		JOIN notifier_plan_destinations pd ON pd.plan_key = p.plan_key
+		JOIN notifier_deliveries d ON d.plan_destination_key = pd.plan_destination_key
 		WHERE d.state = ?
 		ORDER BY p.plan_id`, []any{deliveryStatePending},
 			func(rows *sql.Rows, id *core.PlanID) error {
@@ -466,9 +466,9 @@ func loadDestinationKey(
 
 	err := conn.queryRow(
 		ctx, `SELECT pd.plan_destination_key
-	FROM plans p
-	JOIN plan_destinations pd ON pd.plan_key = p.plan_key
-	JOIN destination_status ds
+	FROM notifier_plans p
+	JOIN notifier_plan_destinations pd ON pd.plan_key = p.plan_key
+	JOIN notifier_destination_status ds
 		ON ds.plan_destination_key = pd.plan_destination_key
 	WHERE p.plan_id = ? AND pd.destination_id = ?`,
 		string(plan), string(destination),

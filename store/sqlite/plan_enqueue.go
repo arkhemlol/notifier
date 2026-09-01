@@ -32,7 +32,7 @@ type encodedItem struct {
 
 func registerPlan(ctx context.Context, conn *txConn, plan core.Plan) (storedPlan, error) {
 	planKey, err := insertReturningKey(ctx, conn, "plan",
-		"INSERT INTO plans(plan_id, policy) VALUES(?, ?)",
+		"INSERT INTO notifier_plans(plan_id, policy) VALUES(?, ?)",
 		string(plan.ID()), int(plan.Policy()))
 	if err != nil {
 		return storedPlan{}, err
@@ -43,7 +43,7 @@ func registerPlan(ctx context.Context, conn *txConn, plan core.Plan) (storedPlan
 
 	for position, destinationID := range destinationIDs {
 		destinationKey, err := insertReturningKey(ctx, conn, "plan destination",
-			`INSERT INTO plan_destinations(
+			`INSERT INTO notifier_plan_destinations(
 				plan_key, destination_id, position
 			) VALUES(?, ?, ?)`,
 			planKey, string(destinationID), position)
@@ -52,7 +52,7 @@ func registerPlan(ctx context.Context, conn *txConn, plan core.Plan) (storedPlan
 		}
 
 		if _, err := conn.exec(
-			ctx, `INSERT INTO destination_status(
+			ctx, `INSERT INTO notifier_destination_status(
 			plan_destination_key, state, failure
 		) VALUES(?, ?, ?)`,
 			destinationKey, destinationStateActive, "",
@@ -124,7 +124,7 @@ func insertObligations(
 		}
 
 		if _, err := conn.exec(
-			ctx, `INSERT INTO deliveries(
+			ctx, `INSERT INTO notifier_deliveries(
 			item_key, plan_destination_key, state, failure, outcome_at
 		) VALUES(?, ?, ?, ?, ?)`,
 			itemKey, destination.key, state, failure, outcomeAt,
@@ -180,7 +180,7 @@ func ensureItem(
 	)
 
 	err := conn.queryRow(
-		ctx, `SELECT item_key, payload FROM items
+		ctx, `SELECT item_key, payload FROM notifier_items
 		WHERE plan_key = ? AND item_id = ?`,
 		planKey, item.id,
 	).Scan(&key, &storedPayload)
@@ -197,7 +197,7 @@ func ensureItem(
 		return 0, false, fmt.Errorf("load existing item: %w", err)
 	}
 
-	key, err = insertReturningKey(ctx, conn, "item", `INSERT INTO items(
+	key, err = insertReturningKey(ctx, conn, "item", `INSERT INTO notifier_items(
 		plan_key, item_id, payload, enqueued_at
 	) VALUES(?, ?, ?, ?)`,
 		planKey, item.id, item.payload, enqueuedAt)
@@ -214,7 +214,7 @@ func loadStoredPlan(ctx context.Context, conn *txConn, planID core.PlanID) (stor
 		policy int
 	)
 
-	if err := conn.queryRow(ctx, `SELECT plan_key, policy FROM plans
+	if err := conn.queryRow(ctx, `SELECT plan_key, policy FROM notifier_plans
 		WHERE plan_id = ?`, string(planID)).Scan(&plan.key, &policy); err != nil {
 		return storedPlan{}, err
 	}
@@ -227,8 +227,8 @@ func loadStoredPlan(ctx context.Context, conn *txConn, planID core.PlanID) (stor
 		pd.position,
 		ds.state,
 		ds.failure
-	FROM plan_destinations pd
-	JOIN destination_status ds
+	FROM notifier_plan_destinations pd
+	JOIN notifier_destination_status ds
 		ON ds.plan_destination_key = pd.plan_destination_key
 	WHERE pd.plan_key = ?
 	ORDER BY pd.position`, []any{plan.key},

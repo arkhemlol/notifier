@@ -135,7 +135,7 @@ func TestNew_RollsBackTheWholeSchemaOnFailure(t *testing.T) {
 	// through; New must leave no trace of whatever it managed to create before
 	// the failure - that's what the enclosing BEGIN IMMEDIATE transaction buys.
 	if _, err := db.ExecContext(
-		t.Context(), "CREATE TABLE plan_destinations (dummy INTEGER)",
+		t.Context(), "CREATE TABLE notifier_plan_destinations (dummy INTEGER)",
 	); err != nil {
 		t.Fatalf("seed conflicting table: %v", err)
 	}

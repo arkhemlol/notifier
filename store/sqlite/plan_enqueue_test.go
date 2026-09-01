@@ -21,9 +21,9 @@ func TestAdmit_ParameterizesValuesSoAdversarialInputCannotReachSQL(t *testing.T)
 		t.Fatalf("New() error = %v", err)
 	}
 
-	const adversarialDestination = core.DestinationID(`destination:one'); DROP TABLE plans; --`)
+	const adversarialDestination = core.DestinationID(`destination:one'); DROP TABLE notifier_plans; --`)
 
-	const adversarialPayload = `payload"); DROP TABLE items; --`
+	const adversarialPayload = `payload"); DROP TABLE notifier_items; --`
 
 	plan := planFor(t, adversarialDestination)
 	admit(t, store, plan, []core.Item[string]{{ID: 1, Payload: adversarialPayload}})

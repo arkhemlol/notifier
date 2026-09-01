@@ -249,7 +249,7 @@ func (r *claimRun[T]) insertBatchItems(
 		items[position] = item
 	}
 
-	query := "INSERT INTO work_batch_items(batch_key, delivery_key, position) VALUES " +
+	query := "INSERT INTO notifier_work_batch_items(batch_key, delivery_key, position) VALUES " +
 		strings.TrimSuffix(strings.Repeat("(?, ?, ?),", len(candidates)), ",")
 
 	if _, err := conn.exec(ctx, query, args...); err != nil {
@@ -279,9 +279,9 @@ func (r *claimRun[T]) loadBatchItems(
 
 	rows, err := queryAll(ctx, conn, "batch items", `SELECT
 			wbi.batch_key, i.item_id, i.payload
-		FROM work_batch_items wbi
-		JOIN deliveries d ON d.delivery_key = wbi.delivery_key
-		JOIN items i ON i.item_key = d.item_key
+		FROM notifier_work_batch_items wbi
+		JOIN notifier_deliveries d ON d.delivery_key = wbi.delivery_key
+		JOIN notifier_items i ON i.item_key = d.item_key
 		WHERE wbi.batch_key IN (`+placeholders(len(batchKeys))+`)
 		ORDER BY wbi.batch_key, wbi.position`, args,
 		func(rows *sql.Rows, row *batchItemRow) error {
@@ -344,10 +344,10 @@ func normalizeScheduledTime(value time.Time) time.Time {
 
 // Keep retry and lease scans separate so SQLite can use each state/time index.
 const reclaimableHalf = `SELECT wb.batch_key, wb.work_id, pd.destination_id, wb.attempt_count
-		FROM work_batches wb
-		JOIN plan_destinations pd
+		FROM notifier_work_batches wb
+		JOIN notifier_plan_destinations pd
 			ON pd.plan_destination_key = wb.plan_destination_key
-		JOIN destination_status ds
+		JOIN notifier_destination_status ds
 			ON ds.plan_destination_key = pd.plan_destination_key
 		WHERE pd.plan_key = ? AND ds.state = ? AND wb.state = ? AND `
 
@@ -382,21 +382,21 @@ func selectReclaimableBatches(
 }
 
 const pendingDeliveriesHead = `SELECT d.delivery_key, i.item_id, i.payload
-		FROM items i
-		JOIN deliveries d ON d.item_key = i.item_key
+		FROM notifier_items i
+		JOIN notifier_deliveries d ON d.item_key = i.item_key
 		WHERE i.plan_key = ?
 			AND d.plan_destination_key = ?
 			AND d.state = ?
 			AND NOT EXISTS (
-				SELECT 1 FROM work_batch_items wbi
+				SELECT 1 FROM notifier_work_batch_items wbi
 				WHERE wbi.delivery_key = d.delivery_key
 			)`
 
 const pendingDeliveriesPriorSettled = `
 			AND NOT EXISTS (
 				SELECT 1
-				FROM deliveries prior
-				JOIN plan_destinations prior_pd
+				FROM notifier_deliveries prior
+				JOIN notifier_plan_destinations prior_pd
 					ON prior_pd.plan_destination_key = prior.plan_destination_key
 				WHERE prior.item_key = d.item_key
 					AND prior_pd.position < ?
