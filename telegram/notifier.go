@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ const (
 	serviceName           = "telegram"
 	defaultWebhookPattern = "POST /telegram/webhook"
 	botPollTimeout        = time.Minute
+	// telegramMessageLimit is Telegram's sendMessage text length limit.
+	telegramMessageLimit = 4096
 )
 
 var (
@@ -427,22 +430,56 @@ func (d *destination[T]) ID() core.DestinationID {
 	return d.id
 }
 
-// Send renders batch and sends one Telegram message.
+// Send renders batch and sends it as one or more Telegram messages, splitting text
+// past Telegram's 4096-char sendMessage limit into consecutive messages.
 func (d *destination[T]) Send(ctx context.Context, batch []T) error {
-	params := &bot.SendMessageParams{
-		ChatID: d.resolved,
-		Text:   d.renderer(batch),
-	}
-	for _, opt := range d.opts {
-		opt(params)
-	}
+	for _, chunk := range splitMessage(d.renderer(batch), telegramMessageLimit) {
+		params := &bot.SendMessageParams{
+			ChatID: d.resolved,
+			Text:   chunk,
+		}
+		for _, opt := range d.opts {
+			opt(params)
+		}
 
-	_, err := d.bot.SendMessage(ctx, params)
-	if err != nil {
-		return classifyTelegramError(err).send()
+		if _, err := d.bot.SendMessage(ctx, params); err != nil {
+			return classifyTelegramError(err).send()
+		}
 	}
 
 	return nil
+}
+
+// splitMessage splits text into chunks of at most limit runes, breaking on the last
+// newline within a chunk when one exists so lines stay intact.
+func splitMessage(text string, limit int) []string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, (len(runes)/limit)+1)
+	for len(runes) > 0 {
+		end := min(limit, len(runes))
+		if newlineAt := lastNewline(runes[:end]); newlineAt > 0 && end < len(runes) {
+			end = newlineAt + 1
+		}
+
+		chunks = append(chunks, string(runes[:end]))
+		runes = runes[end:]
+	}
+
+	return chunks
+}
+
+func lastNewline(runes []rune) int {
+	for i, r := range slices.Backward(runes) {
+		if r == '\n' {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // Probe checks bot access to the chat with getChat.

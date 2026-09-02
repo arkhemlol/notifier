@@ -44,7 +44,7 @@ func main() {
 		logger.Error("build telegram client", "error", err)
 		os.Exit(1)
 	}
-
+	// Note: Chat.Send splits text over Telegram's 4096-char message limit into multiple messages.
 	alerts, err := client.Chat("telegram:alerts", "your_chat_id", func(batch []Alert) string {
 		return batch[0].Text
 	}, telegram.WithParseMode(models.ParseModeMarkdown))
@@ -132,7 +132,8 @@ func main() {
 		}
 
 		for _, result := range report.Results {
-			logger.Info("delivered",
+			logger.Info(
+				"delivered",
 				"work", result.Work,
 				"destination", result.Destination,
 				"outcome", result.Outcome,
