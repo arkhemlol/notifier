@@ -60,6 +60,7 @@ func main() {
 
 	client, err := telegram.NewClient[Alert](telegram.Config{Token: "bot-token"})
 
+	// Note: Chat.Send splits text over Telegram's 4096-char message limit into multiple messages.
 	alerts, err := client.Chat("telegram:alerts", "chat_id", func(batch []Alert) string {
 		return batch[0].Text
 	}, telegram.WithParseMode(models.ParseModeMarkdown)) // opts customize every SendMessage call

@@ -52,7 +52,7 @@ func main() {
 			logger.Error("telegram chat unreachable", "error", err)
 		}
 	}
-
+	// Note: Chat.Send splits text over Telegram's 4096-char message limit into multiple messages.
 	if err := alerts.Send(ctx, []Alert{{Text: "disk almost full"}}); err != nil {
 		logger.Error("telegram send failed", "error", err)
 	}

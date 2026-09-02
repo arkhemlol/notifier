@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -484,6 +485,124 @@ func TestChat_SendPerformsOneRequestWithCallerContext(t *testing.T) {
 
 	if got := requests.Load(); got != 1 {
 		t.Errorf("sendMessage requests = %d, want 1", got)
+	}
+}
+
+func TestChat_SendSplitsTextOverTelegramLimit(t *testing.T) {
+	t.Parallel()
+
+	var texts []string
+
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		// #nosec G120 -- Test input only.
+		if err := request.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+
+		texts = append(texts, request.FormValue("text"))
+
+		return jsonResponse(okMessageResponse), nil
+	})
+
+	client := mustClient(t, Config{
+		Token:      testToken,
+		APIBase:    "https://api.example.test",
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	chat := mustChat(t, client, testDestinationID, "-1001234567890")
+
+	// One line per rendered payload, well past the 4096-char sendMessage limit.
+	line := strings.Repeat("a", 100) + "\n"
+
+	batch := make([]payload, telegramMessageLimit/len(line)+10)
+	for i := range batch {
+		batch[i] = payload{Text: line}
+	}
+
+	err := chat.Send(t.Context(), batch)
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if len(texts) < 2 {
+		t.Fatalf("sendMessage requests = %d, want at least 2", len(texts))
+	}
+
+	var rebuilt strings.Builder
+
+	for _, text := range texts {
+		if len([]rune(text)) > telegramMessageLimit {
+			t.Errorf("chunk length = %d, want <= %d", len([]rune(text)), telegramMessageLimit)
+		}
+
+		rebuilt.WriteString(text)
+	}
+
+	var want strings.Builder
+
+	for i, p := range batch {
+		if i > 0 {
+			want.WriteByte('\n')
+		}
+
+		want.WriteString(p.Text)
+	}
+
+	if got := rebuilt.String(); got != want.String() {
+		t.Error("chunks did not reconstruct the rendered text")
+	}
+}
+
+func TestSplitMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		text  string
+		limit int
+		want  []string
+	}{
+		{
+			name:  "under limit",
+			text:  "short message",
+			limit: 4096,
+			want:  []string{"short message"},
+		},
+		{
+			name:  "empty text",
+			text:  "",
+			limit: 4096,
+			want:  []string{""},
+		},
+		{
+			name:  "breaks on last newline within limit",
+			text:  "aaaa\nbbbb\ncccc",
+			limit: 10,
+			want:  []string{"aaaa\nbbbb\n", "cccc"},
+		},
+		{
+			name:  "hard cut when no newline available",
+			text:  "aaaaaaaaaabbbbbbbbbb",
+			limit: 10,
+			want:  []string{"aaaaaaaaaa", "bbbbbbbbbb"},
+		},
+		{
+			name:  "exact multiple of limit",
+			text:  "aaaabbbb",
+			limit: 4,
+			want:  []string{"aaaa", "bbbb"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := splitMessage(tt.text, tt.limit)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("splitMessage(%q, %d) = %q, want %q", tt.text, tt.limit, got, tt.want)
+			}
+		})
 	}
 }
 
