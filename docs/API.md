@@ -104,16 +104,16 @@ func (d *Dispatcher[T]) Start(
 ) (wait func(context.Context) error)
 
 // Report holds the results of one Run.
-// Statistics (i.e. time in flight, overall time, latency, etc.) could be added later
 type Report struct {
 	// Results is unexported-element; range over it with := to read each one:
-	//   Work        string  // batch identifier, for correlating log lines
-	//   Destination string  // destination identifier
-	//   ItemIDs     []int64 // item IDs in send order
+	//   Work        string        // batch identifier, for correlating log lines
+	//   Destination string        // destination identifier
+	//   ItemIDs     []int64       // item IDs in send order
 	//   Outcome     Outcome
-	//   Attempts    int     // Destination.Send calls made
-	//   SendErr     error   // provider error; matches ErrRetryable, ErrPermanent, ErrQuarantine
-	//   ResolveErr  error   // set if persisting the outcome failed
+	//   Attempts    int           // Destination.Send calls made
+	//   Duration    time.Duration // time spent sending, including retries and backoff
+	//   SendErr     error         // provider error; matches ErrRetryable, ErrPermanent, ErrQuarantine
+	//   ResolveErr  error         // set if persisting the outcome failed
 	Results []struct{ /* see above */ }
 }
 

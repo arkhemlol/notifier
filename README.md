@@ -123,7 +123,6 @@ See [API description](./docs/API.md) for the full public API.
 
 ## TODO
 
-- add statistics
 - more transports (Discord, Slack, grpc, etc.)
 - centralized caching
 - PostgreSQL adapter
