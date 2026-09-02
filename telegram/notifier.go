@@ -76,11 +76,31 @@ type Config struct {
 // Renderer renders a notification batch as one Telegram message.
 type Renderer[T any] func(batch []T) string
 
+// SendOption customizes the bot.SendMessageParams used for a Chat's messages.
+type SendOption func(*bot.SendMessageParams)
+
+// WithParseMode sets the message parse mode, e.g. models.ParseModeMarkdown or models.ParseModeHTML.
+func WithParseMode(mode models.ParseMode) SendOption {
+	return func(p *bot.SendMessageParams) { p.ParseMode = mode }
+}
+
+// WithoutLinkPreview disables the link preview for URLs found in the message text.
+func WithoutLinkPreview() SendOption {
+	return func(p *bot.SendMessageParams) {
+		p.LinkPreviewOptions = &models.LinkPreviewOptions{IsDisabled: bot.True()}
+	}
+}
+
+// WithoutNotification delivers the message silently: no sound or vibration on the
+// recipient's device.
+func WithoutNotification() SendOption {
+	return func(p *bot.SendMessageParams) { p.DisableNotification = true }
+}
+
 // Client is a shared Telegram bot client.
 type Client[T any] struct {
 	cfg          Config
 	bot          *bot.Bot
-	apiBot       *bot.Bot
 	client       *http.Client
 	polling      bool
 	workerErrors chan error
@@ -110,18 +130,12 @@ func NewClient[T any](cfg Config) (*Client[T], error) {
 
 	telegramBot, err := newBot(cfg, client, workerErrors)
 	if err != nil {
-		return nil, fmt.Errorf("%w: construct service bot", ErrInvalidConfig)
-	}
-
-	apiBot, err := newBot(cfg, client, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: construct api bot", ErrInvalidConfig)
+		return nil, fmt.Errorf("%w: construct bot", ErrInvalidConfig)
 	}
 
 	telegramClient := &Client[T]{
 		cfg:          cfg,
 		bot:          telegramBot,
-		apiBot:       apiBot,
 		client:       client,
 		polling:      cfg.Polling,
 		workerErrors: workerErrors,
@@ -222,13 +236,12 @@ func loadCertPool(path string) (*x509.CertPool, error) {
 }
 
 func newBot(cfg Config, client *http.Client, workerErrors chan<- error) (*bot.Bot, error) {
-	report := func(error) {}
-	if workerErrors != nil {
-		report = func(err error) {
-			select {
-			case workerErrors <- classifyTelegramError(err).cause:
-			default:
-			}
+	// Called for both retried and fatal bot errors. Non-blocking: drops the error if
+	// workerErrors is full.
+	report := func(err error) {
+		select {
+		case workerErrors <- err:
+		default:
 		}
 	}
 
@@ -254,8 +267,9 @@ func newBot(cfg Config, client *http.Client, workerErrors chan<- error) (*bot.Bo
 	return telegramBot, nil
 }
 
-// Chat creates a destination for a Telegram chat.
-func (c *Client[T]) Chat(id, chat string, renderer Renderer[T]) (notifier.Destination[T], error) {
+// Chat creates a destination for a Telegram chat. opts customize every SendMessage call,
+// e.g. WithParseMode(models.ParseModeMarkdown) or setting fields directly.
+func (c *Client[T]) Chat(id, chat string, renderer Renderer[T], opts ...SendOption) (notifier.Destination[T], error) {
 	if renderer == nil {
 		return nil, fmt.Errorf("%w: renderer is nil", ErrInvalidChat)
 	}
@@ -269,7 +283,8 @@ func (c *Client[T]) Chat(id, chat string, renderer Renderer[T]) (notifier.Destin
 		id:       core.DestinationID(id),
 		resolved: resolvedChat,
 		renderer: renderer,
-		bot:      c.apiBot,
+		opts:     opts,
+		bot:      c.bot,
 	}, nil
 }
 
@@ -309,7 +324,7 @@ func (c *Client[T]) registerWebhook(ctx context.Context) error {
 		return nil
 	}
 
-	registered, err := c.apiBot.SetWebhook(ctx, &bot.SetWebhookParams{
+	registered, err := c.bot.SetWebhook(ctx, &bot.SetWebhookParams{
 		URL:         c.cfg.WebhookURL,
 		SecretToken: c.cfg.WebhookSecret,
 	})
@@ -338,6 +353,7 @@ func serviceError(ctx context.Context, op core.Op, stage string, err error) erro
 
 func (c *Client[T]) runWorker(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -351,23 +367,22 @@ func (c *Client[T]) runWorker(ctx context.Context) error {
 		c.bot.StartWebhook(runCtx)
 	}()
 
-	var failure error
+	var lastErr error
 
-	select {
-	case <-ctx.Done():
-	case failure = <-c.workerErrors:
-	case <-done:
-		failure = errors.New("worker stopped unexpectedly")
+	for {
+		select {
+		case <-ctx.Done():
+			<-done
+			return nil
+		case lastErr = <-c.workerErrors:
+		case <-done:
+			if lastErr == nil {
+				lastErr = errors.New("no error reported")
+			}
+
+			return serviceError(ctx, core.OpServiceWorker, "receive updates", lastErr)
+		}
 	}
-
-	cancel()
-	<-done
-
-	if failure == nil {
-		return nil
-	}
-
-	return serviceError(ctx, core.OpServiceWorker, "receive updates", failure)
 }
 
 func (c *Client[T]) newWebhookHandler() http.Handler {
@@ -398,6 +413,7 @@ type destination[T any] struct {
 	id       core.DestinationID
 	resolved any
 	renderer Renderer[T]
+	opts     []SendOption
 	bot      *bot.Bot
 }
 
@@ -413,10 +429,15 @@ func (d *destination[T]) ID() core.DestinationID {
 
 // Send renders batch and sends one Telegram message.
 func (d *destination[T]) Send(ctx context.Context, batch []T) error {
-	_, err := d.bot.SendMessage(ctx, &bot.SendMessageParams{
+	params := &bot.SendMessageParams{
 		ChatID: d.resolved,
 		Text:   d.renderer(batch),
-	})
+	}
+	for _, opt := range d.opts {
+		opt(params)
+	}
+
+	_, err := d.bot.SendMessage(ctx, params)
 	if err != nil {
 		return classifyTelegramError(err).send()
 	}

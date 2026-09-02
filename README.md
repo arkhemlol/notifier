@@ -28,6 +28,8 @@ import (
 	// or any other driver of your choice which implements 'database/sql'
 	_ "modernc.org/sqlite"
 
+	"github.com/go-telegram/bot/models"
+
 	"github.com/arkhemlol/notifier"
 	// import only what you actually need
 	"github.com/arkhemlol/notifier/telegram"
@@ -60,7 +62,7 @@ func main() {
 
 	alerts, err := client.Chat("telegram:alerts", "chat_id", func(batch []Alert) string {
 		return batch[0].Text
-	})
+	}, telegram.WithParseMode(models.ParseModeMarkdown)) // opts customize every SendMessage call
 
 	transport, err := email.NewTransport[Alert](email.Config{
 		Host: "smtp.example.com", Port: "465",

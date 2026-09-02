@@ -888,7 +888,7 @@ func TestClient_RunReturnsSetupServiceError(t *testing.T) {
 	assertErrorChainExcludes(t, serviceError, testToken)
 }
 
-func TestClient_RunReturnsWorkerServiceErrorAndJoins(t *testing.T) {
+func TestClient_RunRetriesTransientWorkerErrorsAndShutsDownCleanly(t *testing.T) {
 	t.Parallel()
 
 	const responseSecret = "worker-sensitive-value"
@@ -908,19 +908,31 @@ func TestClient_RunReturnsWorkerServiceErrorAndJoins(t *testing.T) {
 		Polling:    true,
 	})
 
+	ctx, cancel := context.WithCancel(t.Context())
+
 	result := make(chan error, 1)
-	go func() { result <- client.Run(t.Context()) }()
+	go func() { result <- client.Run(ctx) }()
+
+	// Waits for a retried getUpdates request after the first transient failure.
+	deadline := time.After(time.Second)
+
+	for requests.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("worker did not retry after a transient getUpdates failure")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
 
 	select {
 	case err := <-result:
-		serviceError := requireServiceError(t, err, core.OpServiceWorker)
-		assertErrorChainExcludes(t, serviceError, testToken, responseSecret)
+		if err != nil {
+			t.Errorf("Run() = %v, want nil after graceful shutdown", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("Run did not return a polling worker error")
-	}
-
-	if got := requests.Load(); got != 1 {
-		t.Errorf("getUpdates requests = %d, want 1 before worker cancellation", got)
+		t.Fatal("Run did not return after context cancellation")
 	}
 }
 

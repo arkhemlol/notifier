@@ -205,15 +205,22 @@ type Config struct {
 // Renderer renders a notification batch as one Telegram message.
 type Renderer[T any] func(batch []T) string
 
+// SendOption customizes the bot.SendMessageParams used for a Chat's messages.
+type SendOption func(*bot.SendMessageParams)
+
+// WithParseMode sets the message parse mode, e.g. models.ParseModeMarkdown or models.ParseModeHTML.
+func WithParseMode(mode models.ParseMode) SendOption
+
 // NewClient validates cfg and creates a Client without connecting to anything.
 func NewClient[T any](cfg Config) (*Client[T], error)
 
 // Client is a shared Telegram bot client.
 type Client[T any] struct{ /* unexported */ }
 
-// Chat creates a destination for a Telegram chat. It probes with getChat
-// before the first delivery, if SkipProbing wasn't set.
-func (c *Client[T]) Chat(id, chat string, renderer Renderer[T]) (notifier.Destination[T], error)
+// Chat creates a destination for a Telegram chat. opts customize every SendMessage call,
+// e.g. WithParseMode(models.ParseModeMarkdown) or setting fields directly. It probes with
+// getChat before the first delivery, if SkipProbing wasn't set.
+func (c *Client[T]) Chat(id, chat string, renderer Renderer[T], opts ...SendOption) (notifier.Destination[T], error)
 
 // Routes returns the webhook route, or an empty slice in polling mode, without connecting to anything.
 func (c *Client[T]) Routes() []Route

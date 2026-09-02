@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-telegram/bot/models"
+
 	"github.com/arkhemlol/notifier"
 	"github.com/arkhemlol/notifier/email"
 	"github.com/arkhemlol/notifier/store/memory"
@@ -45,7 +47,7 @@ func main() {
 
 	alerts, err := client.Chat("telegram:alerts", "your_chat_id", func(batch []Alert) string {
 		return batch[0].Text
-	})
+	}, telegram.WithParseMode(models.ParseModeMarkdown))
 	if err != nil {
 		logger.Error("build telegram destination", "error", err)
 		os.Exit(1)
