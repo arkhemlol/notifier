@@ -54,6 +54,8 @@ type result struct {
 	Outcome Outcome
 	// Attempts counts calls to Destination.Send.
 	Attempts int
+	// Duration is the time spent sending, including retries and backoff.
+	Duration time.Duration
 	// SendErr retains the provider error for errors.Is and errors.As.
 	SendErr error
 	// ResolveErr reports failure to persist the outcome.
@@ -527,6 +529,7 @@ func (d *Dispatcher[T]) executeWork(
 	failure := d.send(ctx, work, destination, waveSize)
 	outcome.Outcome = failure.outcome
 	outcome.Attempts = failure.attempts
+	outcome.Duration = failure.duration
 	outcome.SendErr = failure.err
 
 	return completedWork{
@@ -555,12 +558,16 @@ type sendFailure struct {
 	scope      core.FailureScope
 	retryAfter time.Duration
 	attempts   int
+	duration   time.Duration
 	err        error
 }
 
 func (d *Dispatcher[T]) send(
 	ctx context.Context, work core.Work[T], destination Destination[T], waveSize int,
-) sendFailure {
+) (failure sendFailure) {
+	started := time.Now()
+	defer func() { failure.duration = time.Since(started) }()
+
 	batch := make([]T, len(work.Items))
 	for i, item := range work.Items {
 		batch[i] = item.Payload

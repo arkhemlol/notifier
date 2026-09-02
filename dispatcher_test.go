@@ -442,6 +442,38 @@ func TestDispatcherRetriesRawErrorsFiveTimes(t *testing.T) {
 	}
 }
 
+func TestDispatcherReportsSendDuration(t *testing.T) {
+	t.Parallel()
+
+	const sendDelay = 20 * time.Millisecond
+
+	destination := &destinationFunc[int]{
+		id: "destination:one",
+		send: func(context.Context, []int) error {
+			time.Sleep(sendDelay)
+
+			return nil
+		},
+	}
+	store := &dispatcherStore[int]{}
+	dispatcher := mustDispatcher(t, store, 1, destination)
+	makeFast(dispatcher)
+	store.claimFunc = oneWork(dispatcher, "destination:one")
+
+	report, err := dispatcher.Run(t.Context())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(report.Results) != 1 {
+		t.Fatalf("Results length = %d, want 1", len(report.Results))
+	}
+
+	if duration := report.Results[0].Duration; duration < sendDelay {
+		t.Errorf("Duration = %v, want at least %v", duration, sendDelay)
+	}
+}
+
 func TestDispatcherUsesFreshAttemptTimeouts(t *testing.T) {
 	t.Parallel()
 
