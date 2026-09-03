@@ -9,3 +9,10 @@ changelog:
         - title: Features
           labels:
               - enhancement
+        - title: Maintenance
+          labels:
+              - chore
+              - documentation
+        - title: Other Changes
+          labels:
+              - "*"
