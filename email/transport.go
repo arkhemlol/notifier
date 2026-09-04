@@ -19,8 +19,8 @@ var (
 	ErrInvalidAddress = errors.New("invalid email address")
 )
 
-// Config defines SMTP settings. All fields except TLSServerName and TLSConfig are required;
-// From does not default to Username.
+// Config defines SMTP settings. All fields except TLSServerName, TLSConfig, and
+// MaxIdleConnections are required; From does not default to Username.
 type Config struct {
 	Host          string
 	Port          string
@@ -31,6 +31,10 @@ type Config struct {
 
 	// TLSConfig overrides the default TLS configuration (TLS 1.2 minimum). NewTransport clones it.
 	TLSConfig *tls.Config
+
+	// MaxIdleConnections caps SMTP connections kept open for reuse between sends,
+	// avoiding a full TCP+TLS+AUTH handshake on every batch. Defaults to 4.
+	MaxIdleConnections int
 }
 
 // Message contains rendered email content.
@@ -43,14 +47,23 @@ type Message struct {
 // Renderer renders a notification batch as email content.
 type Renderer[T any] func(batch []T) Message
 
+// defaultMaxIdleSMTPConnections is used when Config.MaxIdleConnections is zero.
+const defaultMaxIdleSMTPConnections = 4
+
 // Transport is an immutable SMTP client shared safely by concurrent destinations.
+// It keeps a small pool of authenticated connections open between sends.
 type Transport[T any] struct {
 	config    Config
 	endpoint  string
 	tlsConfig *tls.Config
+	maxIdle   int
 
 	probeOnce sync.Once
 	probeErr  error
+
+	idleMu sync.Mutex
+	idle   []*idleSMTPConn
+	closed bool
 }
 
 // NewTransport validates cfg and creates a Transport without network I/O.
@@ -73,11 +86,36 @@ func NewTransport[T any](cfg Config) (*Transport[T], error) {
 		tlsConfig.ServerName = cfg.Host
 	}
 
+	maxIdle := cfg.MaxIdleConnections
+	if maxIdle == 0 {
+		maxIdle = defaultMaxIdleSMTPConnections
+	}
+
 	return &Transport[T]{
 		config:    cfg,
 		endpoint:  net.JoinHostPort(cfg.Host, cfg.Port),
 		tlsConfig: tlsConfig,
+		maxIdle:   maxIdle,
 	}, nil
+}
+
+// Close closes every idle pooled connection and stops future pooling.
+// Connections currently in use finish normally and are closed rather than
+// pooled when they're returned. The Transport remains usable afterward; it
+// just dials a fresh connection for every send from now on.
+func (transport *Transport[T]) Close() error {
+	transport.idleMu.Lock()
+	idle := transport.idle
+	transport.idle = nil
+	transport.closed = true
+	transport.idleMu.Unlock()
+
+	errs := make([]error, len(idle))
+	for i, conn := range idle {
+		errs[i] = conn.connection.Close()
+	}
+
+	return errors.Join(errs...)
 }
 
 func validateConfig(cfg Config) error {
@@ -103,6 +141,10 @@ func validateConfig(cfg Config) error {
 
 	if err := validateEndpointPart("tls server name", cfg.TLSServerName, false); err != nil {
 		return err
+	}
+
+	if cfg.MaxIdleConnections < 0 {
+		return fmt.Errorf("%w: max idle connections must not be negative", ErrInvalidConfig)
 	}
 
 	return nil

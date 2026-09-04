@@ -118,37 +118,60 @@ func (transport *Transport[T]) send(
 	return classifySMTP(ctx, err)
 }
 
+// idleSMTPConn is a greeted, authenticated connection kept in the pool between sends.
+type idleSMTPConn struct {
+	client     *smtp.Client
+	connection net.Conn
+}
+
+// withClient reuses a pooled, already-authenticated connection when one is idle,
+// dialing and authenticating a fresh one otherwise. A connection is only returned
+// to the pool once operation succeeds; any failure discards it, since net/smtp
+// leaves no way to tell whether a failed command left the session desynchronized.
 func (transport *Transport[T]) withClient(
 	ctx context.Context,
 	operation func(*smtp.Client) error,
 ) error {
+	client, connection, err := transport.acquireClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	stopOnCancel := context.AfterFunc(ctx, func() {
+		_ = connection.Close()
+	})
+
+	err = operation(client)
+
+	stopped := stopOnCancel()
+
+	if err != nil || !stopped {
+		_ = connection.Close()
+		return err
+	}
+
+	transport.releaseClient(client, connection)
+
+	return nil
+}
+
+// acquireClient takes an idle pooled connection, or dials and authenticates a new one.
+func (transport *Transport[T]) acquireClient(ctx context.Context) (*smtp.Client, net.Conn, error) {
+	if pooled := transport.takeIdleClient(); pooled != nil {
+		return pooled.client, pooled.connection, nil
+	}
+
 	dialer := tls.Dialer{Config: transport.tlsConfig}
 
 	connection, err := dialer.DialContext(ctx, "tcp", transport.endpoint)
 	if err != nil {
-		return newSMTPOperationError(smtpStageConnection, err)
+		return nil, nil, newSMTPOperationError(smtpStageConnection, err)
 	}
-
-	// net/smtp and textproto take no context, so closing the connection is
-	// the only way to interrupt a blocked read or write. context.AfterFunc
-	// only runs once ctx is actually done, so ctx.Err() is always set by the
-	// time classifySMTP sees the resulting error. A second, independent
-	// deadline set directly on the connection would race that guarantee:
-	// the connection's own timer could fire and unblock the read before the
-	// context's timer has flipped ctx.Err(), reporting a generic network
-	// failure instead of a deadline.
-	stopOnCancel := context.AfterFunc(ctx, func() {
-		_ = connection.Close()
-	})
-	defer func() {
-		stopOnCancel()
-
-		_ = connection.Close()
-	}()
 
 	client, err := smtp.NewClient(connection, transport.config.Host)
 	if err != nil {
-		return newSMTPOperationError(smtpStageGreeting, err)
+		_ = connection.Close()
+		return nil, nil, newSMTPOperationError(smtpStageGreeting, err)
 	}
 
 	auth := smtp.PlainAuth(
@@ -158,10 +181,41 @@ func (transport *Transport[T]) withClient(
 		transport.config.Host,
 	)
 	if err := client.Auth(auth); err != nil {
-		return newSMTPOperationError(smtpStageAuthentication, err)
+		_ = connection.Close()
+		return nil, nil, newSMTPOperationError(smtpStageAuthentication, err)
 	}
 
-	return operation(client)
+	return client, connection, nil
+}
+
+func (transport *Transport[T]) takeIdleClient() *idleSMTPConn {
+	transport.idleMu.Lock()
+	defer transport.idleMu.Unlock()
+
+	n := len(transport.idle)
+	if n == 0 {
+		return nil
+	}
+
+	pooled := transport.idle[n-1]
+	transport.idle[n-1] = nil
+	transport.idle = transport.idle[:n-1]
+
+	return pooled
+}
+
+func (transport *Transport[T]) releaseClient(client *smtp.Client, connection net.Conn) {
+	transport.idleMu.Lock()
+
+	discard := transport.closed || len(transport.idle) >= transport.maxIdle
+	if !discard {
+		transport.idle = append(transport.idle, &idleSMTPConn{client: client, connection: connection})
+	}
+	transport.idleMu.Unlock()
+
+	if discard {
+		_ = connection.Close()
+	}
 }
 
 func newSMTPOperationError(stage smtpStage, err error) *smtpOperationError {
