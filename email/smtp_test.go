@@ -385,6 +385,61 @@ func TestDestination_SendContextCompletionUnblocksProtocol(t *testing.T) {
 	}
 }
 
+func TestTransport_ReusesIdleConnection(t *testing.T) {
+	t.Parallel()
+
+	server := newSMTPTestServer(t, smtpTestBehavior{})
+	transport := server.newTransport(t)
+	destination := newSMTPTestDestination(t, transport)
+
+	// Sequential sends: the pool is deterministic here, unlike under concurrency.
+	for range 2 {
+		if err := destination.Send(context.Background(), []testPayload{{Body: "body"}}); err != nil {
+			t.Fatalf("Send(): %v", err)
+		}
+	}
+
+	snapshot := server.snapshot()
+
+	greetings := countCommand(snapshot.commands, "EHLO") + countCommand(snapshot.commands, "HELO")
+	if greetings != 1 {
+		t.Errorf("greeting count = %d, want 1 (second send should reuse the connection)", greetings)
+	}
+
+	if got := countCommand(snapshot.commands, "AUTH"); got != 1 {
+		t.Errorf("AUTH command count = %d, want 1 (second send should reuse the connection)", got)
+	}
+
+	if got := countCommand(snapshot.commands, "MAIL "); got != 2 {
+		t.Errorf("MAIL command count = %d, want 2", got)
+	}
+}
+
+func TestTransport_CloseClosesIdleConnections(t *testing.T) {
+	t.Parallel()
+
+	server := newSMTPTestServer(t, smtpTestBehavior{})
+	transport := server.newTransport(t)
+	destination := newSMTPTestDestination(t, transport)
+
+	if err := destination.Send(context.Background(), []testPayload{{Body: "body"}}); err != nil {
+		t.Fatalf("Send(): %v", err)
+	}
+
+	if err := transport.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+
+	if got := len(transport.idle); got != 0 {
+		t.Errorf("idle pool size after Close() = %d, want 0", got)
+	}
+
+	// The transport stays usable: Close only drops idle connections.
+	if err := destination.Send(context.Background(), []testPayload{{Body: "body"}}); err != nil {
+		t.Fatalf("Send() after Close(): %v", err)
+	}
+}
+
 func TestTransport_ConcurrentDestinationSends(t *testing.T) {
 	t.Parallel()
 
@@ -486,6 +541,7 @@ type smtpTestServer struct {
 	mutex     sync.Mutex
 	commands  []string
 	messages  [][]byte
+	conns     []net.Conn
 	stallOnce sync.Once
 	closeOnce sync.Once
 	workers   sync.WaitGroup
@@ -578,6 +634,8 @@ func (server *smtpTestServer) serve() {
 		if err != nil {
 			return
 		}
+
+		server.trackConn(connection)
 
 		server.workers.Go(func() {
 			server.handle(connection)
@@ -743,11 +801,28 @@ func (server *smtpTestServer) snapshot() smtpTestSnapshot {
 	return smtpTestSnapshot{commands: commands, messages: messages}
 }
 
+// trackConn records an accepted connection so close can force it shut, even if
+// it's sitting idle in a client-side pool rather than closed after one use.
+func (server *smtpTestServer) trackConn(connection net.Conn) {
+	server.mutex.Lock()
+	defer server.mutex.Unlock()
+
+	server.conns = append(server.conns, connection)
+}
+
 func (server *smtpTestServer) close(t *testing.T) {
 	t.Helper()
 
 	server.closeOnce.Do(func() {
 		_ = server.listener.Close()
+
+		server.mutex.Lock()
+		conns := server.conns
+		server.mutex.Unlock()
+
+		for _, connection := range conns {
+			_ = connection.Close()
+		}
 	})
 
 	select {
