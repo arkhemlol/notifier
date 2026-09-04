@@ -588,7 +588,22 @@ func (d *Dispatcher[T]) send(
 	})
 
 	err := retry.Do(ctx, backoff, func(ctx context.Context) error {
-		if !d.withinLease(0, work, last, waveSize) {
+		// Before the first attempt, just check the lease hasn't expired yet.
+		// The lease was already sized for the whole plan when it was claimed,
+		// so asking again this soon would fail from scheduling delay alone,
+		// even though no time was actually wasted. It's safe to go ahead: if
+		// this attempt still loses the lease to someone else, the store will
+		// reject the resolve for us. The full time-budget check below only
+		// matters once an attempt has actually happened and we're deciding
+		// whether a retry is still worth it.
+		var leaseExhausted bool
+		if last.attempts == 0 {
+			leaseExhausted = work.LeaseUntil.IsZero() || !work.LeaseUntil.After(time.Now())
+		} else {
+			leaseExhausted = !d.withinLease(0, work, last, waveSize)
+		}
+
+		if leaseExhausted {
 			last = retryableFailure(last.attempts, errInsufficientLeaseBudget, last.retryAfter)
 			return last.err
 		}

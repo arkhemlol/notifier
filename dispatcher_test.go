@@ -757,6 +757,78 @@ func TestDispatcherInsufficientWorkLeaseSkipsSend(t *testing.T) {
 	}
 }
 
+// TestDispatcherFullWaveClaimSurvivesDispatchLatency reproduces a store that
+// grants exactly the requested LeaseDuration, as sqlite's does: with a fully
+// packed wave (claimed batches == Workers), requiredLease computes the same
+// budget at claim and at the first withinLease check, so a naive recheck of
+// that same budget would fail on any wall-clock gap between the two (even a
+// scheduling delay) before the batch is ever sent. The first attempt must
+// only require the lease to still be alive, not the full budget again — so
+// this holds regardless of how much of the lease that gap eats into, not
+// just for delays under some margin.
+func TestDispatcherFullWaveClaimSurvivesDispatchLatency(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// leaseFraction of the granted lease is spent simulating latency
+		// between claim and the first send, e.g. 0.01 for a brief scheduling
+		// delay, 0.9 for one that nearly exhausts the lease.
+		leaseFraction float64
+	}{
+		{name: "brief scheduling delay", leaseFraction: 0.01},
+		{name: "delay nearly exhausts the lease", leaseFraction: 0.9},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var attempts atomic.Int32
+
+			destination := &destinationFunc[int]{
+				id: "destination:one",
+				send: func(context.Context, []int) error {
+					attempts.Add(1)
+
+					return nil
+				},
+			}
+			store := &dispatcherStore[int]{resolutions: make(chan core.Resolution, 1)}
+			dispatcher := mustDispatcher(t, store, 1, destination)
+			makeFast(dispatcher)
+
+			store.claimFunc = func(
+				_ context.Context, request core.ClaimRequest,
+			) ([]core.Work[int], error) {
+				leaseUntil := time.Now().Add(request.LeaseDuration)
+
+				// Simulate latency between claim and send: a DB round trip
+				// or goroutine scheduling delay, sized against this run's
+				// own lease rather than a fixed guess.
+				time.Sleep(time.Duration(float64(request.LeaseDuration) * test.leaseFraction))
+
+				return []core.Work[int]{
+					newWork(dispatcher, "work-1", "destination:one", time.Until(leaseUntil)),
+				}, nil
+			}
+
+			report, err := dispatcher.Run(t.Context())
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if attempts.Load() != 1 {
+				t.Errorf("Send() attempts = %d, want 1", attempts.Load())
+			}
+
+			if report.Results[0].SendErr != nil {
+				t.Errorf("SendErr = %v, want nil", report.Results[0].SendErr)
+			}
+		})
+	}
+}
+
 func TestDispatcherJoinsResolveErrors(t *testing.T) {
 	t.Parallel()
 
