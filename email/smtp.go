@@ -129,6 +129,14 @@ func (transport *Transport[T]) withClient(
 		return newSMTPOperationError(smtpStageConnection, err)
 	}
 
+	// net/smtp and textproto take no context, so closing the connection is
+	// the only way to interrupt a blocked read or write. context.AfterFunc
+	// only runs once ctx is actually done, so ctx.Err() is always set by the
+	// time classifySMTP sees the resulting error. A second, independent
+	// deadline set directly on the connection would race that guarantee:
+	// the connection's own timer could fire and unblock the read before the
+	// context's timer has flipped ctx.Err(), reporting a generic network
+	// failure instead of a deadline.
 	stopOnCancel := context.AfterFunc(ctx, func() {
 		_ = connection.Close()
 	})
@@ -137,12 +145,6 @@ func (transport *Transport[T]) withClient(
 
 		_ = connection.Close()
 	}()
-
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := connection.SetDeadline(deadline); err != nil {
-			return newSMTPOperationError(smtpStageConnection, err)
-		}
-	}
 
 	client, err := smtp.NewClient(connection, transport.config.Host)
 	if err != nil {
