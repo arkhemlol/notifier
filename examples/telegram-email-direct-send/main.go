@@ -66,7 +66,11 @@ func main() {
 		logger.Error("build email transport", "error", err)
 		os.Exit(1)
 	}
-	defer transport.Close() // closes pooled SMTP connections on shutdown
+	defer func() {
+		if err := transport.Close(); err != nil { // closes pooled SMTP connections on shutdown
+			logger.Error("close email transport", "error", err)
+		}
+	}()
 
 	team, err := transport.RecipientGroup(
 		"email:team",

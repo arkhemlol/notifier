@@ -270,6 +270,11 @@ func newBot(cfg Config, client *http.Client, workerErrors chan<- error) (*bot.Bo
 	return telegramBot, nil
 }
 
+// Bot returns the underlying go-telegram/bot client so callers can register their own update handlers.
+func (c *Client[T]) Bot() *bot.Bot {
+	return c.bot
+}
+
 // Chat creates a destination for a Telegram chat. opts customize every SendMessage call,
 // e.g. WithParseMode(models.ParseModeMarkdown) or setting fields directly.
 func (c *Client[T]) Chat(id, chat string, renderer Renderer[T], opts ...SendOption) (notifier.Destination[T], error) {

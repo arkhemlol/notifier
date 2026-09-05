@@ -226,6 +226,9 @@ func NewClient[T any](cfg Config) (*Client[T], error)
 // Client is a shared Telegram bot client.
 type Client[T any] struct{ /* unexported */ }
 
+// Bot returns the underlying go-telegram/bot client so callers can register their own update handlers.
+func (c *Client[T]) Bot() *bot.Bot
+
 // Chat creates a destination for a Telegram chat. opts customize every SendMessage call,
 // e.g. WithParseMode(models.ParseModeMarkdown) or setting fields directly. It probes with
 // getChat before the first delivery, if SkipProbing wasn't set.

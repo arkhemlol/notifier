@@ -60,6 +60,8 @@ func main() {
 		logger.Error("build telegram client", "error", err)
 		os.Exit(1)
 	}
+	// client.Bot() exposes the underlying go-telegram/bot client for registering your own update handlers.
+
 	// Note: Chat.Send splits text over Telegram's 4096-char message limit into multiple messages.
 	alerts, err := client.Chat("telegram:alerts", "your_chat_id", func(batch []Alert) string {
 		return batch[0].Text
@@ -78,7 +80,11 @@ func main() {
 		logger.Error("build email transport", "error", err)
 		os.Exit(1)
 	}
-	defer transport.Close() // closes pooled SMTP connections on shutdown
+	defer func() {
+		if err := transport.Close(); err != nil { // closes pooled SMTP connections on shutdown
+			logger.Error("close email transport", "error", err)
+		}
+	}()
 
 	team, err := transport.RecipientGroup(
 		"email:team",
