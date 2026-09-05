@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"time"
 
@@ -15,6 +14,8 @@ import (
 
 // Defaults applied to any DispatcherConfig field left at its zero value.
 const (
+	// Override via DispatcherConfig.Workers for your destinations and provider rate limits.
+	defaultWorkers         = 16
 	defaultMaxItemsPerWork = 100
 	defaultAttemptLimit    = 5
 	defaultAttemptTimeout  = 30 * time.Second
@@ -71,7 +72,7 @@ type Report struct {
 // Zero values select the defaults below; invalid numeric values return
 // ErrInvalidDispatcherConfig.
 type DispatcherConfig struct {
-	// Workers limits batches claimed and sent concurrently. Defaults to GOMAXPROCS.
+	// Workers limits batches claimed and sent concurrently. Defaults to 16.
 	Workers int
 
 	// FirstSuccess stops at the first accepting destination. By default, all must succeed.
@@ -111,13 +112,20 @@ type DispatcherConfig struct {
 	// SkipProbing disables the automatic probe before the first Run. Defaults to false;
 	// skipping makes delivery to an unreachable destination less reliable.
 	SkipProbing bool
+
+	// MaxWavesPerRun caps how many waves one Run call sends before returning,
+	// leaving anything past that for the next scheduled call. Defaults to 0,
+	// meaning no cap: Run drains the plan fully. Set this if a plan fed faster
+	// than Workers can drain it would otherwise keep one Run call running long
+	// enough to block other plans or the caller's schedule.
+	MaxWavesPerRun int
 }
 
 func (c DispatcherConfig) withDefaults() DispatcherConfig {
 	// <= rather than ==: a dispatcher with no workers claims nothing and the
 	// queue silently stops.
 	if c.Workers <= 0 {
-		c.Workers = max(runtime.GOMAXPROCS(0), 1)
+		c.Workers = defaultWorkers
 	}
 
 	if c.MaxItemsPerWork == 0 {
@@ -173,6 +181,8 @@ func (c DispatcherConfig) validate() error {
 		return fmt.Errorf("%w: probe workers must not be negative", ErrInvalidDispatcherConfig)
 	case c.ProbeTimeout < 0:
 		return fmt.Errorf("%w: probe timeout must not be negative", ErrInvalidDispatcherConfig)
+	case c.MaxWavesPerRun < 0:
+		return fmt.Errorf("%w: max waves per run must not be negative", ErrInvalidDispatcherConfig)
 	case c.AttemptLimit < 0 || c.AttemptLimit > maxAttemptLimit:
 		return fmt.Errorf("%w: attempt limit must be between 1 and %d",
 			ErrInvalidDispatcherConfig, maxAttemptLimit)
@@ -199,6 +209,7 @@ type Dispatcher[T any] struct {
 	plan            core.Plan
 	workers         int
 	maxItemsPerWork int
+	maxWavesPerRun  int
 	destinations    map[core.DestinationID]Destination[T]
 
 	attemptLimit   int
@@ -256,6 +267,7 @@ func NewDispatcher[T any](
 		plan:                 core.NewPlan(policy, ids),
 		workers:              config.Workers,
 		maxItemsPerWork:      config.MaxItemsPerWork,
+		maxWavesPerRun:       config.MaxWavesPerRun,
 		destinations:         bindings,
 		attemptLimit:         config.AttemptLimit,
 		attemptTimeout:       config.AttemptTimeout,
@@ -320,11 +332,7 @@ func (d *Dispatcher[T]) Enqueue(ctx context.Context, items ...Item[T]) error {
 	return nil
 }
 
-// Run performs one delivery cycle. An empty queue is not an error.
-// Concurrent calls wait for the active cycle or return when their context is canceled.
-// The first call registers the plan and probes supported destinations before delivery.
-// Before claiming, it retries still-leased writes for successful deliveries.
-// Once its plan is empty, Run may drain another pending plan; unbound work fails permanently.
+// Run keeps claiming and dispatching worker waves until queue is empty.
 func (d *Dispatcher[T]) Run(ctx context.Context) (Report, error) {
 	report := Report{Results: []result{}}
 
@@ -345,29 +353,62 @@ func (d *Dispatcher[T]) Run(ctx context.Context) (Report, error) {
 
 	d.flushUnrecorded(ctx)
 
+	var dispatchErrors []error
+
+	waves := 0
+
+	// If items keep arriving, this keeps running instead of waiting for the
+	// next scheduled tick. MaxWavesPerRun caps it if that ever blocks other plans too long.
+	for ctx.Err() == nil {
+		work, err := d.claimWave(ctx)
+		if err != nil {
+			return report, err
+		}
+
+		if len(work) == 0 {
+			break
+		}
+
+		wave, err := d.dispatchWave(ctx, work)
+		report.Results = append(report.Results, wave.Results...)
+
+		if err != nil {
+			dispatchErrors = append(dispatchErrors, err)
+		}
+
+		waves++
+		if d.maxWavesPerRun > 0 && waves >= d.maxWavesPerRun {
+			break
+		}
+	}
+
+	return report, errors.Join(dispatchErrors...)
+}
+
+// claimWave claims one dispatchable wave, falling back to an earlier stale
+// plan when this one has nothing pending.
+func (d *Dispatcher[T]) claimWave(ctx context.Context) ([]core.Work[T], error) {
 	work, err := d.store.Claim(ctx, d.claimRequest())
 	if err != nil {
-		return report, dispatcherError(core.OpClaim, "", err)
+		return nil, dispatcherError(core.OpClaim, "", err)
 	}
+
 	// Nothing pending for this plan is the moment to clear out what an earlier
 	// destination set left behind.
 	if len(work) == 0 {
 		if work, err = d.claimStale(ctx); err != nil {
-			return report, err
+			return nil, err
 		}
 	}
 
-	switch {
-	case len(work) == 0:
-		return report, nil
-	case len(work) > d.workers:
+	if len(work) > d.workers {
 		cause := fmt.Errorf("store returned %d work batches for a limit of %d",
 			len(work), d.workers)
 
-		return report, dispatcherError(core.OpRun, "", cause)
+		return nil, dispatcherError(core.OpRun, "", cause)
 	}
 
-	return d.dispatchWave(ctx, work)
+	return work, nil
 }
 
 func (d *Dispatcher[T]) claimStale(ctx context.Context) ([]core.Work[T], error) {
