@@ -68,7 +68,9 @@ func main() {
 	transport, err := email.NewTransport[Alert](email.Config{
 		Host: "smtp.example.com", Port: "465",
 		Username: "alerts@example.com", Password: "my_password", From: "alerts@example.com",
+		MaxIdleConnections: 4, // SMTP connections kept open for reuse; defaults to 4
 	})
+	defer transport.Close() // closes pooled SMTP connections on shutdown
 
 	onCall, err := transport.Recipient("email:on-call", "on-call@example.com", func(batch []Alert) email.Message {
 		return email.Message{Subject: "Alert", Text: batch[0].Text}

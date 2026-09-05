@@ -148,12 +148,13 @@ var (
 // package email
 // ---------------------------------------------------------------------------
 
-// Config defines SMTP settings. Every field but TLSServerName and TLSConfig
-// is required; From does not default to Username.
+// Config defines SMTP settings. Every field but TLSServerName, TLSConfig, and
+// MaxIdleConnections is required; From does not default to Username.
 type Config struct {
 	Host, Port, Username, Password, From string
 	TLSServerName                        string      // optional SNI override
 	TLSConfig                            *tls.Config // optional override; NewTransport clones it
+	MaxIdleConnections                   int         // idle connections kept open for reuse; default 4
 }
 
 // Message contains rendered email content.
@@ -168,6 +169,7 @@ type Renderer[T any] func(batch []T) Message
 func NewTransport[T any](cfg Config) (*Transport[T], error)
 
 // Transport is an immutable SMTP client shared safely by concurrent destinations.
+// It keeps a small pool of authenticated connections open between sends.
 type Transport[T any] struct{ /* unexported */ }
 
 // Recipient creates a destination for one SMTP recipient.
@@ -175,6 +177,11 @@ func (t *Transport[T]) Recipient(id, address string, renderer Renderer[T]) (noti
 
 // RecipientGroup creates a destination that sends to all addresses in one SMTP transaction.
 func (t *Transport[T]) RecipientGroup(id string, addresses []string, renderer Renderer[T]) (notifier.Destination[T], error)
+
+// Close closes every idle pooled connection and stops future pooling. Connections
+// already in use finish normally and are closed instead of pooled when returned.
+// The Transport stays usable afterward; it just dials fresh for every send.
+func (t *Transport[T]) Close() error
 
 var (
 	ErrInvalidConfig  = errors.New("...") // invalid Config or a nil renderer

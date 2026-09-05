@@ -56,11 +56,13 @@ func main() {
 	transport, err := email.NewTransport[Alert](email.Config{
 		Host: "smtp.example.com", Port: "465",
 		Username: "alerts@example.com", Password: "my_password", From: "alerts@example.com",
+		MaxIdleConnections: 4, // SMTP connections kept open for reuse; defaults to 4
 	})
 	if err != nil {
 		logger.Error("build email transport", "error", err)
 		os.Exit(1)
 	}
+	defer transport.Close() // closes pooled SMTP connections on shutdown
 
 	team, err := transport.RecipientGroup(
 		"email:team",
