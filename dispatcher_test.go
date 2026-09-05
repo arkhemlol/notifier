@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -141,7 +140,7 @@ func TestNewDispatcher(t *testing.T) {
 			wantErr: ErrInvalidDispatcherConfig,
 		},
 		{
-			// Zero selects the GOMAXPROCS default rather than failing.
+			// Zero selects the default worker count rather than failing.
 			name:         "zero workers",
 			store:        store,
 			config:       DispatcherConfig{},
@@ -407,8 +406,11 @@ func TestDispatcherRetriesRawErrorsFiveTimes(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if store.claimCalls.Load() != 1 {
-		t.Errorf("Claim() calls = %d, want 1", store.claimCalls.Load())
+	// 2, not 1: the 5 send attempts all retry within the one claimed batch's
+	// lease, so only Run's own follow-up claim - confirming the plan is
+	// drained before it returns - adds a second Claim() call.
+	if store.claimCalls.Load() != 2 {
+		t.Errorf("Claim() calls = %d, want 2", store.claimCalls.Load())
 	}
 
 	if attempts.Load() != defaultAttemptLimit {
@@ -798,7 +800,7 @@ func TestDispatcherFullWaveClaimSurvivesDispatchLatency(t *testing.T) {
 			dispatcher := mustDispatcher(t, store, 1, destination)
 			makeFast(dispatcher)
 
-			store.claimFunc = func(
+			store.claimFunc = claimOnce(func(
 				_ context.Context, request core.ClaimRequest,
 			) ([]core.Work[int], error) {
 				leaseUntil := time.Now().Add(request.LeaseDuration)
@@ -811,7 +813,7 @@ func TestDispatcherFullWaveClaimSurvivesDispatchLatency(t *testing.T) {
 				return []core.Work[int]{
 					newWork(dispatcher, "work-1", "destination:one", time.Until(leaseUntil)),
 				}, nil
-			}
+			})
 
 			report, err := dispatcher.Run(t.Context())
 			if err != nil {
@@ -839,12 +841,12 @@ func TestDispatcherJoinsResolveErrors(t *testing.T) {
 	dispatcher := mustDispatcher(t, store, 2, destination)
 	makeFast(dispatcher)
 
-	store.claimFunc = func(context.Context, core.ClaimRequest) ([]core.Work[int], error) {
+	store.claimFunc = claimOnce(func(context.Context, core.ClaimRequest) ([]core.Work[int], error) {
 		return []core.Work[int]{
 			newWork(dispatcher, "work-1", "destination:one", time.Hour),
 			newWork(dispatcher, "work-2", "destination:one", time.Hour),
 		}, nil
-	}
+	})
 	store.resolveFunc = func(_ context.Context, resolution core.Resolution) error {
 		if resolution.Work == "work-1" {
 			return firstErr
@@ -978,7 +980,7 @@ func TestDispatcherBoundsSendsAndSerializesResolves(t *testing.T) {
 	dispatcher := mustDispatcher(t, store, workers, destination)
 	makeFast(dispatcher)
 
-	store.claimFunc = func(context.Context, core.ClaimRequest) ([]core.Work[int], error) {
+	store.claimFunc = claimOnce(func(context.Context, core.ClaimRequest) ([]core.Work[int], error) {
 		work := make([]core.Work[int], 0, workers)
 		for i := range workers {
 			work = append(
@@ -993,7 +995,7 @@ func TestDispatcherBoundsSendsAndSerializesResolves(t *testing.T) {
 		}
 
 		return work, nil
-	}
+	})
 
 	done := make(chan error, 1)
 
@@ -1151,13 +1153,37 @@ func oneWork[T any](
 	return oneWorkWithLease(dispatcher, destination, time.Hour)
 }
 
+// oneWorkWithLease claims "work-1" once, then empty on every later call, like
+// a real store would once that batch is leased or resolved: Run() now loops
+// claiming until a wave comes back empty, and a claimFunc that never empties
+// would keep it looping forever.
 func oneWorkWithLease[T any](
 	dispatcher *Dispatcher[T],
 	destination core.DestinationID,
 	lease time.Duration,
 ) func(context.Context, core.ClaimRequest) ([]core.Work[T], error) {
-	return func(context.Context, core.ClaimRequest) ([]core.Work[T], error) {
+	return claimOnce(func(context.Context, core.ClaimRequest) ([]core.Work[T], error) {
 		return []core.Work[T]{newWork(dispatcher, "work-1", destination, lease)}, nil
+	})
+}
+
+// claimOnce wraps a claimFunc so it only runs on the first call and returns
+// empty after, like a real store would once the batch it hands back is
+// leased or resolved. Run() loops claiming until a wave comes back
+// empty, so a fixture claimFunc that always returns work would loop forever.
+func claimOnce[T any](
+	claim func(context.Context, core.ClaimRequest) ([]core.Work[T], error),
+) func(context.Context, core.ClaimRequest) ([]core.Work[T], error) {
+	var claimed bool
+
+	return func(ctx context.Context, request core.ClaimRequest) ([]core.Work[T], error) {
+		if claimed {
+			return []core.Work[T]{}, nil
+		}
+
+		claimed = true
+
+		return claim(ctx, request)
 	}
 }
 
@@ -1332,15 +1358,20 @@ func TestDispatcherDrainsWorkFromAnEarlierPlan(t *testing.T) {
 	makeFast(dispatcher)
 
 	store.pendingPlans = []core.PlanID{stale, dispatcher.plan.ID()}
-	store.claimFunc = func(_ context.Context, request core.ClaimRequest) ([]core.Work[int], error) {
-		if request.Plan != stale {
-			return []core.Work[int]{}, nil
-		}
 
+	staleWork := claimOnce(func(context.Context, core.ClaimRequest) ([]core.Work[int], error) {
 		work := newWork(dispatcher, "work-stale", "destination:gone", time.Hour)
 		work.Plan = stale
 
 		return []core.Work[int]{work}, nil
+	})
+
+	store.claimFunc = func(ctx context.Context, request core.ClaimRequest) ([]core.Work[int], error) {
+		if request.Plan != stale {
+			return []core.Work[int]{}, nil
+		}
+
+		return staleWork(ctx, request)
 	}
 
 	report, err := dispatcher.Run(t.Context())
@@ -1368,7 +1399,7 @@ func (d *Dispatcher[T]) unrecordedCount() int {
 	return len(d.unrecorded)
 }
 
-func TestDispatcherConfigDefaultsWorkersToGOMAXPROCS(t *testing.T) {
+func TestDispatcherConfigDefaultsWorkers(t *testing.T) {
 	t.Parallel()
 
 	dispatcher, err := NewDispatcher(
@@ -1380,9 +1411,8 @@ func TestDispatcherConfigDefaultsWorkersToGOMAXPROCS(t *testing.T) {
 		t.Fatalf("NewDispatcher() error = %v", err)
 	}
 
-	want := max(runtime.GOMAXPROCS(0), 1)
-	if dispatcher.workers != want {
-		t.Errorf("workers = %d, want GOMAXPROCS %d", dispatcher.workers, want)
+	if dispatcher.workers != defaultWorkers {
+		t.Errorf("workers = %d, want %d", dispatcher.workers, defaultWorkers)
 	}
 }
 
@@ -1405,5 +1435,49 @@ func TestDispatcherConfigNeverYieldsZeroWorkers(t *testing.T) {
 		ErrInvalidDispatcherConfig,
 	) {
 		t.Errorf("validate(Workers=-1) error = %v, want ErrInvalidDispatcherConfig", err)
+	}
+}
+
+func TestDispatcherRunStopsAtMaxWavesPerRun(t *testing.T) {
+	t.Parallel()
+
+	const maxWaves = 3
+
+	store := &dispatcherStore[int]{}
+
+	dispatcher, err := NewDispatcher(
+		store,
+		DispatcherConfig{Workers: 1, MaxWavesPerRun: maxWaves},
+		successfulDestination[int]("destination:one"),
+	)
+	if err != nil {
+		t.Fatalf("NewDispatcher() error = %v", err)
+	}
+
+	makeFast(dispatcher)
+
+	var claimed atomic.Int32
+
+	// Never empties on its own, proving Run stops because of the cap and not
+	// because the plan ran dry.
+	store.claimFunc = func(context.Context, core.ClaimRequest) ([]core.Work[int], error) {
+		id := claimed.Add(1)
+
+		return []core.Work[int]{
+			newWork(dispatcher, core.WorkID(fmt.Sprintf("work-%d", id)), "destination:one", time.Hour),
+		}, nil
+	}
+
+	report, err := dispatcher.Run(t.Context())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if got := claimed.Load(); got != maxWaves {
+		t.Errorf("Claim() calls = %d, want %d", got, maxWaves)
+	}
+
+	if len(report.Results) != maxWaves {
+		t.Errorf("Results length = %d, want %d", len(report.Results), maxWaves)
 	}
 }

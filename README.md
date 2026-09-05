@@ -83,11 +83,12 @@ func main() {
 	dispatcher, err := notifier.NewDispatcher(
 		store,
 		notifier.DispatcherConfig{
-			Workers:      8,                // batches claimed and sent at once; defaults to GOMAXPROCS
-			FirstSuccess: false,            // false: every destination must succeed; true: delivery success for first transport is enough (others not used)
-			ProbeWorkers: 4,                // check destination availability before the first delivery, this many at once
-			ProbeTimeout: 10 * time.Second, // time budget for one probe check
-			SkipProbing:  false,            // true skips that check; delivery to an unreachable destination is then less reliable
+			Workers:        8,                // batches claimed and sent at once; defaults to 16
+			FirstSuccess:   false,            // false: every destination must succeed; true: delivery success for first transport is enough (others not used)
+			ProbeWorkers:   4,                // check destination availability before the first delivery, this many at once
+			ProbeTimeout:   10 * time.Second, // time budget for one probe check
+			SkipProbing:    false,            // true skips that check; delivery to an unreachable destination is then less reliable
+			MaxWavesPerRun: 5,                // stop after 5 waves and let the next scheduled Run pick up the rest; defaults to 0 (no cap)
 		},
 		// Destinations. For a custom probe check per destination, implement notifier.Prober, 
 		// or wrap one in a type that embeds it and adds its own Probe.

@@ -11,7 +11,7 @@ Types prefixed `core.` live in the unexported `internal/core` package.
 // probes. Every field defaults at its zero value; an invalid numeric value
 // returns ErrInvalidDispatcherConfig.
 type DispatcherConfig struct {
-	Workers              int           // batches claimed and sent concurrently; default GOMAXPROCS
+	Workers              int           // batches claimed and sent concurrently; default 16
 	FirstSuccess         bool          // stop at the first accepting destination; default - all must succeed
 	MaxItemsPerWork      int           // items per Destination.Send call; default 100
 	AttemptLimit         int           // total retries per batch, including the first; default 5, max 20
@@ -24,6 +24,7 @@ type DispatcherConfig struct {
 	ProbeWorkers         int           // destination checks in flight before the first delivery; default 4
 	ProbeTimeout         time.Duration // budget for one check; a timeout leaves stored state unchanged; default 10s
 	SkipProbing          bool          // disables the automatic probe; default false, less reliable delivery when true
+	MaxWavesPerRun       int           // waves sent before Run returns; default 0, meaning no cap
 }
 
 // Item pairs a storage-level identifier with a delivery payload. Item.ID
@@ -91,9 +92,10 @@ type Dispatcher[T any] struct{ /* unexported */ }
 // Enqueue persists items for later delivery; it does not send them.
 func (d *Dispatcher[T]) Enqueue(ctx context.Context, items ...Item[T]) error
 
-// Run performs one delivery cycle: claims queued work, sends it, and
-// resolves each outcome. An empty queue is not an error. The first call also
-// registers the delivery plan and probes destinations that support Probe.
+// Run claims and sends waves of queued work until none is left (or
+// MaxWavesPerRun is reached), resolving each outcome as it completes. An
+// empty queue is not an error. The first call also registers the delivery
+// plan and probes destinations that support Probe.
 func (d *Dispatcher[T]) Run(ctx context.Context) (Report, error)
 
 // Start runs Run on a schedule until ctx is cancelled, calling onCycle after
