@@ -7,7 +7,7 @@ require (
 	github.com/sethvargo/go-retry v0.4.0
 	// both only used in tests
 	go.uber.org/goleak v1.3.0
-	modernc.org/sqlite v1.58.0
+	modernc.org/sqlite v1.59.0
 )
 
 require (
