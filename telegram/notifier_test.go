@@ -26,6 +26,8 @@ import (
 
 	"github.com/arkhemlol/notifier"
 	"github.com/arkhemlol/notifier/internal/core"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 const (
@@ -1082,6 +1084,96 @@ func TestClient_WebhookRouteAuthenticatesRequests(t *testing.T) {
 				t.Errorf("status = %d, want %d", response.Code, test.status)
 			}
 		})
+	}
+}
+
+func TestClient_WebhookHandlersOutliveRequest(t *testing.T) {
+	t.Parallel()
+
+	sent := make(chan struct{})
+
+	var once sync.Once
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if filepath.Base(request.URL.Path) != "sendMessage" {
+			t.Errorf("unexpected Telegram method %q", filepath.Base(request.URL.Path))
+			return
+		}
+
+		once.Do(func() { close(sent) })
+
+		_, _ = w.Write([]byte(okMessageResponse))
+	}))
+	defer api.Close()
+
+	client := mustClient(t, Config{
+		Token:      testToken,
+		APIBase:    api.URL,
+		HTTPClient: api.Client(),
+	})
+
+	responded := make(chan struct{})
+	handlerErr := make(chan error, 1)
+
+	client.Bot().RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypePrefix,
+		func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			// Calls the Bot API only after the webhook response, when net/http has
+			// canceled the request context.
+			<-responded
+
+			_, err := b.SendMessage(ctx, &bot.SendMessageParams{ChatID: update.Message.Chat.ID, Text: "echo"})
+			handlerErr <- err
+		})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	go func() { _ = client.Run(ctx) }()
+
+	mux := http.NewServeMux()
+	for _, route := range client.Routes() {
+		mux.Handle(route.Pattern, route.Handler)
+	}
+
+	webhook := httptest.NewServer(mux)
+	defer webhook.Close()
+
+	request, err := http.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		webhook.URL+"/telegram/webhook",
+		strings.NewReader(`{"update_id":1,"message":{"message_id":1,"date":1,"chat":{"id":123,"type":"private"},"text":"hi"}}`),
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	response, err := webhook.Client().Do(request)
+	if err != nil {
+		t.Fatalf("post update: %v", err)
+	}
+
+	_ = response.Body.Close()
+
+	close(responded)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("webhook status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	select {
+	case err := <-handlerErr:
+		if err != nil {
+			t.Fatalf("handler SendMessage after webhook response: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not run")
+	}
+
+	select {
+	case <-sent:
+	default:
+		t.Fatal("fake Bot API did not receive sendMessage")
 	}
 }
 

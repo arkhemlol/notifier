@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -394,6 +393,8 @@ func (c *Client[T]) runWorker(ctx context.Context) error {
 }
 
 func (c *Client[T]) newWebhookHandler() http.Handler {
+	enqueue := c.bot.WebhookHandler()
+
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		secret := request.Header.Get("X-Telegram-Bot-Api-Secret-Token")
 		if !validWebhookSecret(c.cfg.WebhookSecret, secret) {
@@ -401,14 +402,10 @@ func (c *Client[T]) newWebhookHandler() http.Handler {
 			return
 		}
 
-		update := &models.Update{}
-		if err := json.NewDecoder(request.Body).Decode(update); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		c.bot.ProcessUpdate(request.Context(), update)
-		w.WriteHeader(http.StatusOK)
+		// The bot's webhook handler queues the update for StartWebhook, which runs
+		// handlers on the Run context. The request context is canceled once the
+		// response is sent, so handlers must not inherit it.
+		enqueue(w, request)
 	})
 }
 
