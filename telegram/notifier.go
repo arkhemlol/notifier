@@ -315,7 +315,7 @@ func (c *Client[T]) Routes() []Route {
 // Run registers the webhook when configured and blocks until shutdown or worker failure.
 func (c *Client[T]) Run(ctx context.Context) error {
 	select {
-	case <-c.workerErrors:
+	case _ = <-c.workerErrors: //nolint:staticcheck // Explicitly discard the stale worker error.
 	default:
 	}
 
