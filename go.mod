@@ -3,7 +3,7 @@ module github.com/arkhemlol/notifier
 go 1.27.4
 
 require (
-	github.com/go-telegram/bot v1.29.0
+	github.com/go-telegram/bot v1.30.0
 	github.com/sethvargo/go-retry v0.5.0
 	// both only used in tests
 	go.uber.org/goleak v1.3.0
